@@ -1,0 +1,184 @@
+<!DOCTYPE html>  
+<html lang="id">  
+<head>  
+<meta charset="utf-8" />  
+<title>MANANGKATA — Vertical Slice</title>  
+<style>  
+  html,body{margin:0;background:#0b0705;overflow:hidden;height:100%;}  
+  canvas{display:block;margin:0 auto;image-rendering:pixelated;  
+         image-rendering:crisp-edges;background:#111;}  
+  #wrap{position:fixed;inset:0;display:grid;place-items:center;}  
+</style>  
+</head>  
+<body>  
+<div id="wrap"><canvas id="c" width="320" height="180"></canvas></div>  
+<script>  
+/* =========================================================  
+   MANANGKATA — Vertical Slice (prototype)  
+   Resolusi internal 320x180, di-scale pixel-perfect.  
+   Semua sprite digambar secara prosedural (rect) supaya  
+   bisa kamu ganti dengan sprite sheet nanti.  
+   ========================================================= */  
+const c = document.getElementById('c');  
+const ctx = c.getContext('2d');  
+ctx.imageSmoothingEnabled = false;  
+
+// Pixel-perfect scaling  
+function fit(){  
+  const s = Math.max(1, Math.floor(Math.min(innerWidth/320, innerHeight/180)));  
+  c.style.width = (320*s)+'px';  
+  c.style.height= (180*s)+'px';  
+}  
+addEventListener('resize', fit); fit();  
+
+// ---------- Input ----------  
+const keys = {};  
+addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; if([' ','arrowup','arrowdown'].includes(e.key.toLowerCase()))e.preventDefault(); });  
+addEventListener('keyup',   e=>{ keys[e.key.toLowerCase()]=false; });  
+
+// ---------- Palette (semua warna asli) ----------  
+const P = {  
+  skyDark:'#1a0e0a', skySmoke:'#3a201a', ember:'#ff6a1a',  
+  forestDark:'#14261a', forestBurn:'#5a2a10',  
+  steel:'#59606e', steelDark:'#2b2f38',  
+  red:'#e0322b', redDeep:'#8a1414', white:'#f5efe6',  
+  skin:'#c98e63', dress:'#1a1a20', bow:'#c8242e',  
+  hpRed:'#e0322b', hpBg:'#3a0d0d', xp:'#ffd23f', ammo:'#ffd23f'  
+};  
+
+// ---------- Camera ----------  
+const cam = { x:0, y:0, smooth:0.12 };  
+
+// ---------- World ----------  
+const world = { width: 320*6, height: 180 };  
+
+// ---------- Player ----------  
+const player = {  
+  x:120, y:120, w:12, h:20,  
+  vx:0, vy:0, facing:1,  
+  hp:100, maxHp:100, lives:3,  
+  grounded:false, crouch:false,  
+  weapons:['pulse','plasma','burst'], wi:0,  
+  ammo:{ pulse:Infinity, plasma:24, burst:40 },  
+  grenades:5, score:0, combo:0, comboT:0,  
+  invuln:0, checkpoint:false,  
+  shootCD:0  
+};  
+function currentWeapon(){ return player.weapons[player.wi]; }  
+
+// ---------- Actors ----------  
+let bullets=[]; let ebullets=[]; let enemies=[]; let particles=[]; let pickups=[]; let floaters=[];  
+let civilians=[]; let boss=null; let miniBoss=null;  
+let state='play'; // play | dead | win  
+let frame=0;  
+let tutorialStage=0;  
+
+function spawnBullet(x,y,vx,vy,dmg,type='player'){  
+  (type==='player'?bullets:ebullets).push({x,y,vx,vy,dmg,life:120,r:2});  
+}  
+function burst(x,y,n,color){  
+  for(let i=0;i<n;i++){  
+    const a=Math.random()*Math.PI*2, s=Math.random()*2+0.5;  
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-0.6,life:20+Math.random()*20,color});  
+  }  
+}  
+function float(x,y,txt,col='#ffd23f'){ floaters.push({x,y,txt,col,life:50}); }  
+
+// ---------- Enemies ----------  
+function makeGrunt(x,y){ return {t:'grunt',x,y,w:12,h:18,hp:30,vx:0,vy:0,st:'idle',t0:0,cd:60}; }  
+function makeDrone(x,y){ return {t:'drone',x,y,w:12,h:10,hp:20,vx:0,vy:0,st:'idle',t0:0,cd:70,baseY:y,phase:Math.random()*6}; }  
+function makeSpider(x,y){ return {t:'spider',x,y,w:14,h:10,hp:45,vx:0,vy:0,st:'idle',t0:0,cd:70}; }  
+function makeTurret(x,y){ return {t:'turret',x,y,w:12,h:12,hp:60,vx:0,vy:0,st:'idle',t0:0,cd:90}; }  
+function makeMiniBoss(x,y){ return {t:'miniboss',x,y,w:22,h:28,hp:400,maxHp:400,vx:0,vy:0,st:'idle',t0:0,cd:100,phase:0}; }  
+function makeBoss(x,y){ return {t:'boss',x,y,w:34,h:38,hp:600,maxHp:600,vx:0,vy:0,st:'idle',t0:0,cd:120,phase:1}; }  
+
+// Level 1 layout — posisi sederhana  
+const platforms = [  
+  {x:0,y:150,w:320,h:30},  
+  {x:340,y:150,w:280,h:30},  
+  {x:640,y:150,w:400,h:30},  
+  {x:1060,y:150,w:520,h:30},  
+  {x:1600,y:150,w:320,h:30},  
+  {x:260,y:100,w:60,h:8},{x:500,y:90,w:70,h:8},  
+  {x:820,y:100,w:80,h:8},{x:1200,y:90,w:80,h:8},  
+  {x:1380,y:70,w:60,h:8},{x:1700,y:95,w:80,h:8},  
+];  
+// checkpoint  
+const checkpoint = {x:1100,y:130,w:12,h:20,active:false};  
+
+function resetLevel(){  
+  bullets=[];ebullets=[];enemies=[];particles=[];pickups=[];floaters=[];civilians=[];  
+  player.x=120; player.y=120; player.hp=player.maxHp; player.ammo.plasma=24; player.ammo.burst=40;  
+  player.grenades=5;  
+  // spawn 5 musuh + mini-boss + boss (dalam realita muncul bertahap, di slice ini semua ada)  
+  enemies.push(makeGrunt(300,132));  
+  enemies.push(makeDrone(420,90));  
+  enemies.push(makeTurret(600,138));  
+  enemies.push(makeSpider(760,140));  
+  enemies.push(makeGrunt(900,132));  
+  enemies.push(makeDrone(1000,80));  
+  // mini-boss  
+  miniBoss = makeMiniBoss(1400,122);  
+  // boss  
+  boss = makeBoss(1780,112); boss.active=false;  
+  // civilians  
+  civilians.push({x:700,y:132,w:10,h:18,rescued:false,hp:30});  
+  civilians.push({x:730,y:132,w:10,h:18,rescued:false,hp:30});  
+  civilians.push({x:1500,y:132,w:10,h:18,rescued:false,hp:30});  
+  // pickups  
+  for(let i=0;i<6;i++) pickups.push({x:400+i*260,y:120,t:'ammo',w:8,h:8});  
+  pickups.push({x:820,y:80,t:'hp',w:8,h:8});  
+  pickups.push({x:1380,y:50,t:'hp',w:8,h:8});  
+}  
+resetLevel();  
+
+// ---------- Logic ----------  
+function physics(e){  
+  e.vy += 0.35;  
+  e.x += e.vx; e.y += e.vy;  
+  // ground  
+  let onG=false;  
+  for(const p of platforms){  
+    if(e.x+e.w>p.x && e.x<p.x+p.w && e.y+e.h>p.y && e.y+e.h< p.y+p.h+8 && e.vy>=0){  
+      e.y=p.y-e.h; e.vy=0; onG=true;  
+    }  
+  }  
+  e.grounded=onG;  
+}  
+
+function updatePlayer(){  
+  if(state!=='play') return;  
+  const spd = player.crouch?0.8:1.6;  
+  let mv=0;  
+  if(keys['a']||keys['arrowleft']) {mv=-1; player.facing=-1;}  
+  if(keys['d']||keys['arrowright']){mv= 1; player.facing= 1;}  
+  player.vx = mv*spd;  
+  player.crouch = !!keys['s'];  
+
+  if((keys['w']||keys[' ']||keys['arrowup']) && player.grounded){  
+    player.vy=-5.4; player.grounded=false;  
+    burst(player.x+player.w/2, player.y+player.h, 5, '#ff9a3c');  
+  }  
+
+  physics(player);  
+  if(player.x<0)player.x=0;  
+  if(player.x>world.width-player.w)player.x=world.width-player.w;  
+  if(player.y>world.height+40) hitPlayer(20);  
+
+  // shoot  
+  player.shootCD--;  
+  if((keys['j']||keys['enter']) && player.shootCD<=0) shoot();  
+  // grenade  
+  if(keys['k'] && player.grenades>0 && player.shootCD<=0){  
+    player.grenades--; player.shootCD=20;  
+    spawnBullet(player.x+player.w/2,player.y+4,player.facing*2.2,-1.6,25);  
+  }  
+  // switch weapon  
+  if(keys['l']){ keys['l']=false; player.wi=(player.wi+1)%player.weapons.length; }  
+
+  if(player.invuln>0) player.invuln--;  
+  if(player.comboT>0){ player.comboT--; if(player.comboT<=0) player.combo=0; }  
+}  
+
+function shoot(){  
+  const w
